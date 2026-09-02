@@ -8,10 +8,10 @@
 -- ===== KONFIGURASI =====
 local Settings = {
     Enabled = true,
-    AutoPickAndPlace = true,
+    AutoPickAndPlace = false,   -- DEFAULT MATI! Hanya jalan setelah user toggle manual
     PickPlaceDelay = 0.05,
     LoopInterval = 0.2,
-    SelectedPetIDs = {},       -- Gunakan ID bukan nama
+    SelectedPetRefs = {},       -- Simpan referensi objek langsung (unique per instance)
     GardenSlots = 8,
 }
 
@@ -93,48 +93,6 @@ local function isPet(item)
     return false
 end
 
-local function getPetID(pet)
-    -- Coba ambil ID dari berbagai sumber
-    -- 1. Attribute
-    local attrs = pet:GetAttributes()
-    if attrs then
-        for name, value in pairs(attrs) do
-            local nameLower = string.lower(name)
-            if nameLower == "id" or nameLower == "petid" or nameLower == "pet_id" or nameLower == "petid2" then
-                return tostring(value)
-            end
-        end
-    end
-    
-    -- 2. Cari child yang menyimpan ID
-    for _, child in ipairs(pet:GetChildren()) do
-        if child:IsA("IntValue") or child:IsA("NumberValue") or child:IsA("StringValue") then
-            local childName = string.lower(child.Name)
-            if childName == "id" or string.find(childName, "id") then
-                return tostring(child.Value)
-            end
-        end
-    end
-    
-    -- 3. Cari di configuration/folder
-    local config = pet:FindFirstChild("Config") or pet:FindFirstChild("Configuration") or pet:FindFirstChild("Data")
-    if config then
-        local idValue = config:FindFirstChild("ID") or config:FindFirstChild("Id") or config:FindFirstChild("PetID")
-        if idValue and (idValue:IsA("IntValue") or idValue:IsA("NumberValue") or idValue:IsA("StringValue")) then
-            return tostring(idValue.Value)
-        end
-    end
-    
-    -- 4. Fallback: gunakan nama + hash sederhana
-    -- Ini memastikan pet dengan nama sama tapi objek beda tetap dibedakan
-    local hash = 0
-    local str = pet:GetFullName()
-    for i = 1, #str do
-        hash = (hash * 31 + string.byte(str, i)) % 1000000
-    end
-    return pet.Name .. "_" .. tostring(hash)
-end
-
 -- ===== AUTO-DETECT REMOTES =====
 local Remotes = {
     Pick = nil, Place = nil, Equip = nil,
@@ -185,29 +143,22 @@ local function detectRemotes()
 end
 
 -- ===== FUNGSI UTAMA =====
+-- TIDAK dedupe! Tampilkan SEMUA pet (termasuk yang nama/mutasi/kg sama)
+-- Setiap instance pet unik berdasarkan objek referensi
 local function getAllPets()
     local pets = {}
-    local seenIDs = {}
     
     if Character then
         for _, v in ipairs(Character:GetChildren()) do
             if v:IsA("Tool") and isPet(v) then
-                local id = getPetID(v)
-                if not seenIDs[id] then
-                    table.insert(pets, v)
-                    seenIDs[id] = true
-                end
+                table.insert(pets, v)
             end
         end
     end
     
     for _, v in ipairs(Backpack:GetChildren()) do
         if v:IsA("Tool") and isPet(v) then
-            local id = getPetID(v)
-            if not seenIDs[id] then
-                table.insert(pets, v)
-                seenIDs[id] = true
-            end
+            table.insert(pets, v)
         end
     end
     
@@ -470,15 +421,15 @@ local function createUI()
             yOffset = yOffset + 45
         else
             for _, pet in ipairs(pets) do
-                local petID = getPetID(pet)
                 local petBtn = Instance.new("TextButton")
                 petBtn.Size = UDim2.new(1, -10, 0, 35)
                 petBtn.Position = UDim2.new(0, 5, 0, yOffset)
-                petBtn.Name = petID
+                petBtn.Name = pet.Name
                 
+                -- Check selected by object reference
                 local isSelected = false
-                for _, selectedID in ipairs(Settings.SelectedPetIDs) do
-                    if selectedID == petID then
+                for _, selectedRef in ipairs(Settings.SelectedPetRefs) do
+                    if selectedRef == pet then
                         isSelected = true
                         break
                     end
@@ -486,21 +437,21 @@ local function createUI()
                 
                 petBtn.BackgroundColor3 = isSelected and Color3.fromRGB(50, 200, 100) or Color3.fromRGB(60, 60, 60)
                 petBtn.TextColor3 = Color3.new(1, 1, 1)
-                petBtn.Text = string.format("%s %s (ID: %s)", isSelected and "[X]" or "[ ]", pet.Name, string.sub(petID, 1, 10))
+                petBtn.Text = string.format("%s %s (#%d)", isSelected and "[X]" or "[ ]", pet.Name, #Settings.SelectedPetRefs + 1)
                 petBtn.Font = Enum.Font.SourceSansBold
                 petBtn.TextSize = 12
                 
                 petBtn.MouseButton1Click:Connect(function()
                     local found = false
-                    for i, id in ipairs(Settings.SelectedPetIDs) do
-                        if id == petID then
-                            table.remove(Settings.SelectedPetIDs, i)
+                    for i, ref in ipairs(Settings.SelectedPetRefs) do
+                        if ref == pet then
+                            table.remove(Settings.SelectedPetRefs, i)
                             found = true
                             break
                         end
                     end
                     if not found then
-                        table.insert(Settings.SelectedPetIDs, petID)
+                        table.insert(Settings.SelectedPetRefs, pet)
                     end
                     refreshPetList()
                 end)
@@ -542,7 +493,9 @@ local function createUI()
     refreshPetList()
 end
 
--- ===== MAIN LOOP v2 =====
+-- ===== MAIN LOOP v3 (SAFE) =====
+-- HANYA jalan jika AutoPickAndPlace = true (toggle manual dari UI)
+-- Menggunakan referensi objek langsung, bukan ID string
 local function startAutoPickPlace()
     task.spawn(function()
         while task.wait(Settings.LoopInterval) do
@@ -552,19 +505,17 @@ local function startAutoPickPlace()
             
             local petsToUse = {}
             
-            if #Settings.SelectedPetIDs > 0 then
-                local allPets = getAllPets()
-                for _, pet in ipairs(allPets) do
-                    local petID = getPetID(pet)
-                    for _, selectedID in ipairs(Settings.SelectedPetIDs) do
-                        if petID == selectedID then
-                            table.insert(petsToUse, pet)
-                            break
-                        end
+            if #Settings.SelectedPetRefs > 0 then
+                -- Gunakan referensi yang sudah dipilih user
+                for _, petRef in ipairs(Settings.SelectedPetRefs) do
+                    if petRef and petRef.Parent and isPet(petRef) then
+                        table.insert(petsToUse, petRef)
                     end
                 end
             else
-                petsToUse = getAllPets()
+                -- TIDAK ada pet dipilih = TIDAK melakukan apa-apa (SAFETY)
+                -- Jangan proses semua pet!
+                petsToUse = {}
             end
             
             for _, pet in ipairs(petsToUse) do
@@ -588,20 +539,20 @@ local function init()
     
     detectRemotes()
     
-    -- Debug: list semua item di inventory untuk cek filter
-    print("\n[DEBUG] Item di Character:")
+    -- Debug: list semua item di inventory untuk cek filter (TANPA menyentuh item)
+    print("\n[DEBUG] Item di Character (TANPA modifikasi):")
     if Character then
         for _, v in ipairs(Character:GetChildren()) do
             if v:IsA("Tool") then
-                print("  -", v.Name, "| isPet:", isPet(v), "| ID:", getPetID(v))
+                print("  -", v.Name, "| isPet:", isPet(v), "| Parent:", v.Parent and v.Parent.Name or "nil")
             end
         end
     end
     
-    print("\n[DEBUG] Item di Backpack:")
+    print("\n[DEBUG] Item di Backpack (TANPA modifikasi):")
     for _, v in ipairs(Backpack:GetChildren()) do
         if v:IsA("Tool") then
-            print("  -", v.Name, "| isPet:", isPet(v), "| ID:", getPetID(v))
+            print("  -", v.Name, "| isPet:", isPet(v), "| Parent:", v.Parent and v.Parent.Name or "nil")
         end
     end
     
